@@ -39,6 +39,8 @@ validation_set = data[cutoff:]
 
 batch_size = 5
 block_size = 10
+embedding_dimensions = 32
+dropout = 0.2
 
 def get_batch(dataset):
     indices = torch.randint(high=len(dataset) - block_size, size=(batch_size,))
@@ -47,13 +49,53 @@ def get_batch(dataset):
     return inputs, targets
 
 
-class BigramLanguageModel(nn.Module):
+
+class Head(nn.Module):
+    def __init__(self, head_size):
+        super().__init__()
+        self.key = nn.Linear(embedding_dimensions, head_size, bias=False)
+        self.query = nn.Linear(embedding_dimensions, head_size, bias=False)
+        self.value = nn.Linear(embedding_dimensions, head_size, bias=False)
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        # TODO—rewrite this line-by-line to check understanding
+
+        # input of size (batch, time-step, channels)
+        # output of size (batch, time-step, head size)
+        B,T,C = x.shape
+        k = self.key(x)   # (B,T,hs)
+        q = self.query(x) # (B,T,hs)
+        # compute attention scores ("affinities")
+        wei = q @ k.transpose(-2,-1) * k.shape[-1]**-0.5 # (B, T, hs) @ (B, hs, T) -> (B, T, T)
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T)
+        wei = nn.functional.softmax(wei, dim=-1) # (B, T, T)
+        wei = self.dropout(wei)
+        # perform the weighted aggregation of the values
+        v = self.value(x) # (B,T,hs)
+        out = wei @ v # (B, T, T) @ (B, T, hs) -> (B, T, hs)
+        return out
+
+
+class LanguageModel(nn.Module):
     def __init__(self, vocab_size):
         super().__init__()
-        self.token_embedding_table = nn.Embedding(vocab_size, vocab_size)
+        self.token_embedding_table = nn.Embedding(vocab_size, embedding_dimensions)
+        self.position_embedding_table = nn.Embedding(block_size, embedding_dimensions)
+        self.self_attention_head = Head(embedding_dimensions)
+        self.head = nn.Linear(embedding_dimensions, vocab_size)
 
     def forward(self, inputs, targets=None):
-        logits = self.token_embedding_table(inputs)
+        B, T = inputs.shape
+
+        token_embeddings = self.token_embedding_table(inputs)
+        position_embeddings = self.position_embedding_table(torch.arange(T))
+        x = token_embeddings + position_embeddings
+        x = self.self_attention_head(x)
+        logits = self.head(x)
+
         if targets is None:
             loss = None
         else:
@@ -67,7 +109,8 @@ class BigramLanguageModel(nn.Module):
 
     def generate(self, inputs, max_length):
         for _ in range(max_length):
-            logits, loss = self(inputs)
+            inputs_cropped = inputs[:, -block_size:]
+            logits, loss = self(inputs_cropped)
             logits = logits[:, -1, :]
             probabilities = nn.functional.softmax(logits, dim=1)
             following = torch.multinomial(probabilities, num_samples=1)
@@ -76,7 +119,7 @@ class BigramLanguageModel(nn.Module):
 
 
 inputs, targets = get_batch(training_set)
-m = BigramLanguageModel(vocab_size)
+m = LanguageModel(vocab_size)
 logits, loss = m(inputs, targets)
 print(logits.shape)
 print(loss)
@@ -95,5 +138,3 @@ for steps in range(10000):
     print(loss.item())
 
 print(decode(m.generate(inputs = torch.zeros((1, 1), dtype=torch.long), max_length=100)[0].tolist()))
-
-# up to 42:20 in the video
