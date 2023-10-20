@@ -79,12 +79,58 @@ class Head(nn.Module):
         return out
 
 
+class MultiHeadAttention(nn.Module):
+    def __init__(self, head_count, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(head_count)])
+        self.projection = nn.Linear(embedding_dimensions, embedding_dimensions)
+
+    def forward(self, x):
+        # -1 is the last dimension; the channel dimension
+        output = torch.cat([h(x) for h in self.heads], dim=-1)
+        output = self.projection(output)
+        return output
+
+
+class FeedForward(nn.Module):
+    def __init__(self, embedding_dimensions):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(embedding_dimensions, 4 * embedding_dimensions),
+            nn.ReLU(),
+            nn.Linear(4 * embedding_dimensions, embedding_dimensions),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class Block(nn.Module):
+    def __init__(self, embedding_dimensions, head_count):
+        super().__init__()
+        head_size = embedding_dimensions // head_count
+        self.self_attention = MultiHeadAttention(head_count, head_size)
+        self.feed_forward = FeedForward(embedding_dimensions)
+        self.layer_norm_1 = nn.LayerNorm(embedding_dimensions)
+        self.layer_norm_2 = nn.LayerNorm(embedding_dimensions)
+
+    def forward(self, x):
+        x = x + self.self_attention(self.layer_norm_1(x))
+        x = x + self.feed_forward(self.layer_norm_2(x))
+        return x
+
+
 class LanguageModel(nn.Module):
     def __init__(self, vocab_size):
         super().__init__()
         self.token_embedding_table = nn.Embedding(vocab_size, embedding_dimensions)
         self.position_embedding_table = nn.Embedding(block_size, embedding_dimensions)
-        self.self_attention_head = Head(embedding_dimensions)
+        self.blocks = nn.Sequential(
+            Block(embedding_dimensions, head_count=4),
+            Block(embedding_dimensions, head_count=4),
+            Block(embedding_dimensions, head_count=4),
+            nn.LayerNorm(embedding_dimensions),
+        )
         self.head = nn.Linear(embedding_dimensions, vocab_size)
 
     def forward(self, inputs, targets=None):
@@ -93,7 +139,7 @@ class LanguageModel(nn.Module):
         token_embeddings = self.token_embedding_table(inputs)
         position_embeddings = self.position_embedding_table(torch.arange(T))
         x = token_embeddings + position_embeddings
-        x = self.self_attention_head(x)
+        x = self.blocks(x)
         logits = self.head(x)
 
         if targets is None:
